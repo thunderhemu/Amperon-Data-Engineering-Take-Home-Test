@@ -1,0 +1,69 @@
+version: '3'
+
+services:
+
+  postgres:
+    image: 'postgres:16.2@sha256:6b841c8f6a819884207402f1209a8116844365df15fca8cf556fc54a24c70800'
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tomorrow
+    volumes:
+      # Mounts the initialization script for table creation and constraint setup
+      - "${PWD}/scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql"
+      - "pgdata:/var/lib/postgresql/data"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}" ]
+      interval: 1s
+      timeout: 20s
+      retries: 20
+
+  tomorrow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # This assumes tomorrow/__main__.py or tomorrow/scheduler.py is configured to start the scheduler.
+    command: python -m tomorrow.scheduler
+
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: tomorrow
+      # The TOMORROW_IO_API_KEY must be passed via environment variables (e.g., in a .env file or shell)
+      TOMORROW_IO_API_KEY: ${TOMORROW_IO_API_KEY}
+    volumes:
+      - "${PWD}/blobs:/tmp/blobs"
+    # Ensure the PostgreSQL database is ready before the scheduler starts
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Command starts the notebook server accessible remotely
+    command: jupyter notebook --ip 0.0.0.0 --NotebookApp.token='' --NotebookApp.password='' --allow-root
+    ports:
+      - "8888:8888"
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: tomorrow
+    volumes:
+      # Mounts the analysis notebook for access via the browser
+      - "${PWD}/analysis.ipynb:/app/analysis.ipynb"
+      - "${PWD}/tomorrow:/app/tomorrow" # Ensure app code is available for analysis
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

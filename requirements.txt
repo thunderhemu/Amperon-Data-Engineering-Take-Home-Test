@@ -1,0 +1,21 @@
+pytest==8.1.1
+jupyter==1.0.0
+
+# API Client
+requests
+
+# Database
+sqlalchemy
+psycopg2-binary
+
+# Data processing
+pandas
+
+# Scheduler
+APScheduler
+
+# Jupyter/Analysis
+notebook
+matplotlib
+seaborn
+pyyaml # For config file loading
