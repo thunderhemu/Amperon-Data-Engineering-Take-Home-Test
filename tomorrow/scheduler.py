@@ -1,54 +1,69 @@
 import logging
 import sys
 from apscheduler.schedulers.blocking import BlockingScheduler
-from .config_loader import CONFIG
+
+from .config_loader import load_config
 from .etl import run_weather_etl
+
+# 🔹 CRITICAL FIX: send logs to stdout for Docker
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
 
 logger = logging.getLogger(__name__)
 
 
-def configure_logging():
-    """Sets up root logging handler for consistent output."""
-    # Use INFO level for the scheduler service
-    log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
-    logging.basicConfig(
-        level=logging.INFO,
-        format=log_format,
-        stream=sys.stdout
-    )
+def main() -> None:
+    """Run bootstrap ETL and start hourly scheduler."""
 
+    logger.info("Scheduler service starting")
 
-def main():
-    """Initializes logging, runs the bootstrap ETL, and starts the scheduler."""
-    configure_logging()
+    config = load_config()
 
-    logger.info("SCHEDULER: Service starting up. Environment validation passed.")
-
-    # 1. Bootstrap: Run ETL once immediately
-    logger.info("SCHEDULER: Running initial ETL for bootstrap...")
+    # --- Bootstrap run ---
+    logger.info("Running initial ETL bootstrap")
     try:
-        run_weather_etl(CONFIG)
-        logger.info("SCHEDULER: Initial ETL completed successfully.")
+        records = run_weather_etl(config)
+        logger.info(
+            "Initial ETL completed successfully (records processed=%s)",
+            records,
+        )
     except Exception:
-        logger.error("SCHEDULER: Initial ETL run failed. Scheduler will proceed with hourly schedule.", exc_info=True)
+        logger.exception(
+            "Initial ETL failed. Scheduler will still start hourly jobs."
+        )
 
-    # 2. Start the hourly job
+    # --- Scheduled job definition ---
+    def scheduled_job() -> None:
+        logger.info("Scheduled ETL job started")
+        records = run_weather_etl(config)
+        logger.info(
+            "Scheduled ETL job finished (records processed=%s)",
+            records,
+        )
+
+    # --- Scheduler setup ---
     scheduler = BlockingScheduler()
     scheduler.add_job(
-        func=lambda: run_weather_etl(CONFIG),
-        trigger='interval',
+        func=scheduled_job,
+        trigger="interval",
         hours=1,
-        id='hourly_weather_scrape'
+        id="hourly_weather_scrape",
+        coalesce=True,
+        misfire_grace_time=300,
     )
 
-    logger.info("SCHEDULER: Hourly scheduler loop started (Interval: 1 hour).")
+    logger.info("Hourly scheduler started (interval=1h)")
+
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
-        logger.info("SCHEDULER: Shutting down gracefully.")
-    except Exception as e:
-        logger.critical(f"SCHEDULER: Critical error during operation: {e}", exc_info=True)
+        logger.info("Scheduler shutting down gracefully")
+    except Exception:
+        logger.critical("Scheduler crashed unexpectedly", exc_info=True)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

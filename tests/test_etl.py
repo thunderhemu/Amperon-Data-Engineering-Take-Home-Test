@@ -1,66 +1,164 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 from tomorrow.etl import run_weather_etl
 
 
-class TestETLOrchestrator:
+@pytest.fixture
+def base_config(app_config):
+    """
+    Base ETL config derived from app_config,
+    safe to modify per test.
+    """
+    return {
+        "api": app_config["api"],
+        "db": app_config["db"],
+        "locations": [
+            {"lat": 25.9, "lon": -97.4},
+            {"lat": 25.8, "lon": -97.5},
+        ],
+        "rate_limit_sleep_seconds": 0,  # speed up tests
+    }
 
-    @patch('tomorrow.etl.WeatherDB')
-    @patch('tomorrow.etl.TomorrowAPIClient')
-    def test_etl_full_success(self, MockAPI, MockDB, app_config, sample_db_data):
-        """Test full pipeline success where all locations are processed successfully."""
 
-        # Setup Mocks
-        mock_api_instance = MockAPI.return_value
-        mock_db_instance = MockDB.return_value
+@patch("tomorrow.etl.time.sleep")
+@patch("tomorrow.etl.WeatherDB")
+@patch("tomorrow.etl.TomorrowAPIClient")
+def test_etl_success_happy_path(
+    mock_api_cls,
+    mock_db_cls,
+    mock_sleep,
+    base_config,
+):
+    """
+    Happy path:
+    - API returns data for each location
+    - DB insert succeeds
+    - Total records processed is correct
+    """
 
-        # Configure the API client to return data for every location
-        mock_api_instance.fetch_weather_data.return_value = sample_db_data
+    # --- Mock API client ---
+    mock_api = MagicMock()
+    mock_api.fetch_weather_data.side_effect = [
+        [{"temperature": 10}, {"temperature": 11}],  # location 1
+        [{"temperature": 12}],                       # location 2
+    ]
+    mock_api_cls.return_value = mock_api
 
-        # Execution
-        run_weather_etl(app_config)
+    # --- Mock DB client ---
+    mock_db = MagicMock()
+    mock_db.bulk_insert_weather_data.return_value = None
+    mock_db_cls.return_value = mock_db
 
-        # Assertions
-        expected_api_calls = len(app_config['locations'])
+    total = run_weather_etl(base_config)
 
-        # 1. Verify API was called for ALL 10 locations
-        assert mock_api_instance.fetch_weather_data.call_count == expected_api_calls
+    assert total == 3
+    assert mock_api.fetch_weather_data.call_count == 2
+    assert mock_db.bulk_insert_weather_data.call_count == 2
+    assert mock_sleep.call_count == 2
 
-        # 2. Verify DB bulk insert was called for ALL 10 locations
-        assert mock_db_instance.bulk_insert_weather_data.call_count == expected_api_calls
+    mock_api.close.assert_called_once()
+    mock_db.close.assert_called_once()
 
-        # 3. Verify DB bulk insert received data (called with sample data)
-        mock_db_instance.bulk_insert_weather_data.assert_called_with(sample_db_data)
 
-    @patch('tomorrow.etl.WeatherDB')
-    @patch('tomorrow.etl.TomorrowAPIClient')
-    def test_etl_location_failure_resilience(self, MockAPI, MockDB, app_config, sample_db_data):
-        """Test resilience: Ensures the pipeline continues after one location fails."""
+@patch("tomorrow.etl.time.sleep")
+@patch("tomorrow.etl.WeatherDB")
+@patch("tomorrow.etl.TomorrowAPIClient")
+def test_etl_skips_invalid_location(
+    mock_api_cls,
+    mock_db_cls,
+    mock_sleep,
+    base_config,
+):
+    """
+    Invalid location entries should be skipped safely.
+    """
 
-        mock_api_instance = MockAPI.return_value
-        mock_db_instance = MockDB.return_value
+    base_config["locations"].append({"lat": 10.0})  # missing lon
 
-        locations = app_config['locations']
-        fail_location_index = 2  # Make the 3rd location fail
+    mock_api = MagicMock()
+    mock_api.fetch_weather_data.return_value = [{"temperature": 10}]
+    mock_api_cls.return_value = mock_api
 
-        # Set up a side effect list: 9 successes, 1 failure
-        side_effects = [sample_db_data] * len(locations)
-        side_effects[fail_location_index] = Exception("Mock API failure for critical test.")
+    mock_db = MagicMock()
+    mock_db_cls.return_value = mock_db
 
-        mock_api_instance.fetch_weather_data.side_effect = side_effects
+    total = run_weather_etl(base_config)
 
-        # Execution
-        run_weather_etl(app_config)
+    assert total == 2  # only valid locations processed
+    assert mock_api.fetch_weather_data.call_count == 2
+    assert mock_db.bulk_insert_weather_data.call_count == 2
 
-        # Assertions
-        total_locations = len(locations)
-        successful_locations = total_locations - 1
 
-        # 1. Verify API was *attempted* for ALL locations
-        assert mock_api_instance.fetch_weather_data.call_count == total_locations
+@patch("tomorrow.etl.time.sleep")
+@patch("tomorrow.etl.WeatherDB")
+@patch("tomorrow.etl.TomorrowAPIClient")
+def test_etl_handles_empty_api_response(
+    mock_api_cls,
+    mock_db_cls,
+    mock_sleep,
+    base_config,
+):
+    """
+    Empty API responses should not be inserted.
+    """
 
-        # 2. Verify DB insert was called ONLY for successful locations
-        assert mock_db_instance.bulk_insert_weather_data.call_count == successful_locations
+    mock_api = MagicMock()
+    mock_api.fetch_weather_data.side_effect = [
+        [],
+        [{"temperature": 12}],
+    ]
+    mock_api_cls.return_value = mock_api
 
-        # 3. Verify the ETL did NOT crash (function returned successfully)
-        # (Implicitly passed if no exception was raised)
+    mock_db = MagicMock()
+    mock_db_cls.return_value = mock_db
+
+    total = run_weather_etl(base_config)
+
+    assert total == 1
+    assert mock_db.bulk_insert_weather_data.call_count == 1
+
+
+@patch("tomorrow.etl.time.sleep")
+@patch("tomorrow.etl.WeatherDB")
+@patch("tomorrow.etl.TomorrowAPIClient")
+def test_etl_continues_on_location_failure(
+    mock_api_cls,
+    mock_db_cls,
+    mock_sleep,
+    base_config,
+):
+    """
+    Failure for one location must not stop the ETL.
+    """
+
+    mock_api = MagicMock()
+    mock_api.fetch_weather_data.side_effect = [
+        RuntimeError("API failure"),
+        [{"temperature": 12}],
+    ]
+    mock_api_cls.return_value = mock_api
+
+    mock_db = MagicMock()
+    mock_db_cls.return_value = mock_db
+
+    total = run_weather_etl(base_config)
+
+    assert total == 1
+    assert mock_api.fetch_weather_data.call_count == 2
+    assert mock_db.bulk_insert_weather_data.call_count == 1
+
+
+def test_etl_invalid_locations_config(app_config):
+    """
+    locations must be a list.
+    """
+
+    bad_config = {
+        "api": app_config["api"],
+        "db": app_config["db"],
+        "locations": "not-a-list",
+    }
+
+    with pytest.raises(RuntimeError):
+        run_weather_etl(bad_config)

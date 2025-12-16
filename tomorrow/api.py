@@ -8,105 +8,117 @@ logger = logging.getLogger(__name__)
 
 
 class TomorrowAPIClient:
-    """A resilient API client with explicit error handling and exponential backoff."""
+    """
+    Tomorrow.io v4 Weather Forecast client.
+
+    """
 
     def __init__(self, api_config: Dict[str, Any]):
-        self.base_url = api_config['base_url']
-        self.key = api_config['key']
-        self.config = api_config
-        self.session = requests.Session()
-        self.max_retries = api_config['max_retries']
-        self.timeout = api_config['timeout_seconds']
-        logger.info("API Client initialized.")
+        self.base_url = api_config["base_url"]
+        self.endpoint = api_config["forecast_endpoint"]
+        self.key = api_config["key"]
 
-    def _call_api(self, endpoint: str, params: Dict[str, Any], location_str: str) -> Dict[str, Any]:
-        """Handles HTTP request, retries, and error surfacing."""
-        full_url = f"{self.base_url}{endpoint}"
-        params['apikey'] = self.key
+        self.fields = ",".join(api_config["fields"])
+        self.timesteps = api_config["timesteps"]
+        self.units = api_config["units"]
+
+        self.max_retries = api_config["max_retries"]
+        self.timeout = api_config["timeout_seconds"]
+        self.retry_backoff = api_config.get("retry_backoff_seconds", 2)
+
+        self.session = requests.Session()
+
+        logger.info("Tomorrow.io Forecast API client initialized")
+
+    def _call_api(self, params: Dict[str, Any], location: str) -> Dict[str, Any]:
+        url = f"{self.base_url}{self.endpoint}"
+        params = dict(params)
+        params["apikey"] = self.key
 
         for attempt in range(self.max_retries):
             try:
-                response = self.session.get(full_url, params=params, timeout=self.timeout)
+                response = self.session.get(url, params=params, timeout=self.timeout)
                 response.raise_for_status()
                 return response.json()
-            except requests.exceptions.HTTPError as e:
-                status = response.status_code
-                if status in [429, 500, 502, 503, 504] and attempt < self.max_retries - 1:
-                    wait_time = 2 ** attempt
-                    logger.warning(
-                        f"API: Failed ({status}) for {location_str}. "
-                        f"Retrying in {wait_time}s (Attempt {attempt + 1})."
+
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response else None
+
+                # HARD STOP on rate limit
+                if status == 429:
+                    logger.critical(
+                        "Tomorrow.io rate limit exceeded for %s. "
+                        "Free tier allows only 25 requests/hour. "
+                        "Skipping until next scheduled run.",
+                        location,
                     )
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"API: Final failure for {location_str} (Status: {status}).")
                     raise
-            except requests.exceptions.RequestException as e:
-                logger.error(f"API: Network or timeout error for {location_str}: {e}")
+
+                # Retry only transient server errors
+                if status in {500, 502, 503, 504} and attempt < self.max_retries - 1:
+                    wait = self.retry_backoff ** attempt
+                    logger.warning(
+                        "Transient API error %s for %s. Retrying in %ss",
+                        status, location, wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.error(
+                        "API failure for %s (status=%s)", location, status
+                    )
+                    raise
+
+            except requests.exceptions.RequestException as exc:
                 if attempt < self.max_retries - 1:
                     time.sleep(1)
                 else:
                     raise
 
-        raise RuntimeError(f"API: Failed to fetch data for {location_str} after all retries.")
-
-    def _extract_intervals(self, raw_data: Dict[str, Any], is_forecast: bool) -> List[Dict[str, Any]]:
-        """Safely extracts and transforms the required fields from the JSON response."""
-        data = []
-        try:
-            intervals = raw_data['data']['timelines'][0]['intervals']
-            for interval in intervals:
-                values = interval['values']
-                data.append({
-                    'time_stamp': datetime.fromisoformat(interval['startTime'].replace('Z', '+00:00')),
-                    'is_forecast': is_forecast,
-                    'temperature': values.get('temperature'),
-                    'wind_speed': values.get('windSpeed'),
-                    'humidity': values.get('humidity'),
-                    'precipitation_type': values.get('precipitationType'),
-                })
-        except (KeyError, IndexError, TypeError) as e:
-            logger.error(f"API: Failed to parse response structure. Error: {e}", exc_info=True)
-            return []
-
-        return data
+        raise RuntimeError(f"API failed after retries for {location}")
 
     def fetch_weather_data(self, lat: float, lon: float) -> List[Dict[str, Any]]:
-        """Coordinates fetching both history and forecast."""
-        location_str = f"{lat},{lon}"
-        now_utc = datetime.now(timezone.utc)
+        """
+        Fetch hourly weather data from 24h ago to 5 days in the future
+        using /v4/weather/forecast.
+        """
+        location = f"{lat},{lon}"
+        now = datetime.now(timezone.utc)
 
-        REQUIRED_FIELDS = 'temperature,windSpeed,humidity,precipitationType'
-        TIMELINE_ENDPOINT = '/v4/timelines'
-
-        history_end = now_utc
-        history_start = now_utc - timedelta(hours=24)
-        forecast_start = now_utc + timedelta(minutes=self.config['timesteps_minutes'])
-        forecast_end = now_utc + timedelta(days=5)
-
-        # 1. History (24h back)
-        history_params = {
-            'location': location_str, 'timesteps': self.config['timesteps'], 'units': self.config['units'],
-            'fields': REQUIRED_FIELDS,
-            'startTime': history_start.isoformat().replace('+00:00', 'Z'),
-            'endTime': history_end.isoformat().replace('+00:00', 'Z')
+        params = {
+            "location": location,
+            "timesteps": self.timesteps,
+            "units": self.units,
+            "fields": self.fields,
+            "startTime": (now - timedelta(hours=24)).isoformat().replace("+00:00", "Z"),
+            "endTime": (now + timedelta(days=5)).isoformat().replace("+00:00", "Z"),
         }
-        logger.info(f"Fetching history for {location_str}...")
-        history_raw = self._call_api(TIMELINE_ENDPOINT, history_params, location_str + ' (History)')
-        history_data = self._extract_intervals(history_raw, is_forecast=False)
 
-        # 2. Forecast (5 days forward)
-        forecast_params = {
-            'location': location_str, 'timesteps': self.config['timesteps'], 'units': self.config['units'],
-            'fields': REQUIRED_FIELDS,
-            'startTime': forecast_start.isoformat().replace('+00:00', 'Z'),
-            'endTime': forecast_end.isoformat().replace('+00:00', 'Z')
-        }
-        logger.info(f"Fetching forecast for {location_str}...")
-        forecast_raw = self._call_api(TIMELINE_ENDPOINT, forecast_params, location_str + ' (Forecast)')
-        forecast_data = self._extract_intervals(forecast_raw, is_forecast=True)
+        logger.info("Fetching forecast for %s", location)
+        raw = self._call_api(params, location)
 
-        # 3. Consolidate and Return
-        all_weather_data = history_data + forecast_data
-        logger.info(f"Successfully fetched {len(all_weather_data)} total data points for {location_str}.")
-        return all_weather_data
+        intervals = raw.get("timelines", {}).get("hourly", [])
+        if not intervals:
+            logger.warning("No hourly data returned for %s", location)
+            return []
+
+        records: List[Dict[str, Any]] = []
+        for interval in intervals:
+            values = interval.get("values", {})
+            records.append(
+                {
+                    "time_stamp": datetime.fromisoformat(
+                        interval["time"].replace("Z", "+00:00")
+                    ),
+                    "is_forecast": interval["time"] > now.isoformat(),
+                    "temperature": values.get("temperature"),
+                    "wind_speed": values.get("windSpeed"),
+                    "humidity": values.get("humidity"),
+                    "precipitation_type": values.get("precipitationType"),
+                }
+            )
+
+        logger.info("Parsed %d hourly records for %s", len(records), location)
+        return records
+
+    def close(self):
+        self.session.close()

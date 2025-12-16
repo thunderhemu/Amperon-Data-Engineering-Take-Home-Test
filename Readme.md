@@ -5,6 +5,24 @@ This repository contains a containerized ETL (Extract, Transform, Load) system d
 The system is automated using an internal Python scheduler and is built using Docker Compose for local, reproducible deployment.
 
 ## Getting Started
+## Architecture Overview
+
+The system consists of three Dockerized services:
+
+1. **PostgreSQL**
+   - Stores all weather data
+   - Uses a persistent volume so data survives container restarts
+
+2. **ETL Scheduler (Python)**
+   - Fetches data from the Tomorrow.io API
+   - Performs an initial bootstrap load on startup
+   - Continues execution on an hourly schedule
+
+3. **Jupyter Notebook**
+   - Used for querying and visualizing the data
+
+Each service is defined and orchestrated using `docker-compose.yml`.
+
 
 ### Prerequisites
 
@@ -53,8 +71,6 @@ To stop and remove all containers, networks, and the persistent volume (`pgdata`
 ```bash
 docker compose down --volumes
 ```
-
------
 
 ##  Analysis and Visualization
 

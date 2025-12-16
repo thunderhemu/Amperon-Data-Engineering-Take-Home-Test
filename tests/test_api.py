@@ -1,87 +1,139 @@
 import pytest
 import requests
 from unittest.mock import patch, MagicMock
+from datetime import datetime, timezone
+
 from tomorrow.api import TomorrowAPIClient
 
-# Mock the current time to make tests predictable
-MOCK_NOW = "2025-12-15T15:00:00Z"
+
+MOCK_NOW = datetime(2025, 12, 15, 15, 0, tzinfo=timezone.utc)
 
 
 def mock_get_request(status_code, json_data=None):
-    """Utility function to create a mock response object."""
+    """Create a mock HTTP response with proper HTTPError behavior."""
     mock_resp = MagicMock()
     mock_resp.status_code = status_code
-    mock_resp.json.return_value = json_data if json_data is not None else {}
-    mock_resp.raise_for_status.side_effect = (
-        requests.exceptions.HTTPError(f"Mock HTTP {status_code}")
-        if status_code >= 400 else None
-    )
+    mock_resp.json.return_value = json_data or {}
+
+    if status_code >= 400:
+        error = requests.exceptions.HTTPError(f"Mock HTTP {status_code}")
+        error.response = mock_resp      # ✅ CRITICAL LINE
+        mock_resp.raise_for_status.side_effect = error
+    else:
+        mock_resp.raise_for_status.return_value = None
+
     return mock_resp
 
 
-@patch('requests.Session.get')
+
+@patch("requests.Session.get")
 class TestTomorrowAPIClient:
 
-    @patch('datetime.datetime', MagicMock(now=lambda tz: datetime.fromisoformat(MOCK_NOW.replace('Z', '+00:00')),
-                                          side_effect=lambda tz: datetime.fromisoformat(
-                                              MOCK_NOW.replace('Z', '+00:00'))))
-    def test_fetch_success_and_parsing(self, mock_get, app_config, sample_api_response):
-        """Test successful fetch and data parsing."""
-        client = TomorrowAPIClient(app_config['api'])
+    @patch("tomorrow.api.datetime")
+    def test_fetch_success_and_parsing(
+        self, mock_datetime, mock_get, app_config
+    ):
+        """Successful API call and correct parsing of hourly data."""
 
-        # Mock responses for history and forecast calls
-        mock_get.side_effect = [
-            mock_get_request(200, sample_api_response),  # History
-            mock_get_request(200, sample_api_response),  # Forecast
-        ]
+        mock_datetime.now.return_value = MOCK_NOW
 
+        mock_get.return_value = mock_get_request(
+            200,
+            {
+                "timelines": {
+                    "hourly": [
+                        {
+                            "time": "2025-12-15T14:00:00Z",
+                            "values": {
+                                "temperature": 15.5,
+                                "windSpeed": 5.0,
+                                "humidity": 70,
+                                "precipitationType": 0,
+                            },
+                        },
+                        {
+                            "time": "2025-12-15T16:00:00Z",
+                            "values": {
+                                "temperature": 16.0,
+                                "windSpeed": 5.5,
+                                "humidity": 68,
+                                "precipitationType": 1,
+                            },
+                        },
+                    ]
+                }
+            },
+        )
+
+        client = TomorrowAPIClient(app_config["api"])
         data = client.fetch_weather_data(25.9, -97.4)
 
-        assert len(data) == 4  # 2 from history + 2 from forecast
-        assert data[0]['temperature'] == 15.5
-        assert data[2]['is_forecast'] is True
-        assert data[0]['latitude'] == 25.9
-        assert mock_get.call_count == 2
+        assert len(data) == 2
+        assert data[0]["temperature"] == 15.5
+        assert data[0]["is_forecast"] is False
+        assert data[1]["is_forecast"] is True
+        assert mock_get.call_count == 1
 
-    @patch('datetime.datetime', MagicMock(now=lambda tz: datetime.fromisoformat(MOCK_NOW.replace('Z', '+00:00')),
-                                          side_effect=lambda tz: datetime.fromisoformat(
-                                              MOCK_NOW.replace('Z', '+00:00'))))
-    def test_api_retry_and_success(self, mock_get, app_config, sample_api_response):
-        """Test resilience: 429 failure followed by a successful retry."""
-        client = TomorrowAPIClient(app_config['api'])
 
-        # Sequence: 429 (History 1), 200 (History 2), 200 (Forecast)
+    @patch("tomorrow.api.datetime")
+    def test_retry_on_5xx_then_success(
+        self, mock_datetime, mock_get, app_config
+    ):
+        """Retry on transient server error (500) and succeed."""
+
+        mock_datetime.now.return_value = MOCK_NOW
+
         mock_get.side_effect = [
-            mock_get_request(429),
-            mock_get_request(200, sample_api_response),
-            mock_get_request(200, sample_api_response),
+            mock_get_request(500),
+            mock_get_request(
+                200,
+                {
+                    "timelines": {
+                        "hourly": [
+                            {
+                                "time": "2025-12-15T15:00:00Z",
+                                "values": {"temperature": 15.0},
+                            }
+                        ]
+                    }
+                },
+            ),
         ]
 
-        # Patch time.sleep to run fast
-        with patch('time.sleep'):
+        client = TomorrowAPIClient(app_config["api"])
+
+        with patch("time.sleep"):
             data = client.fetch_weather_data(25.9, -97.4)
 
-        assert len(data) == 4  # Must return data
-        assert mock_get.call_count == 3  # Must have called 3 times (1 fail + 2 success)
+        assert len(data) == 1
+        assert mock_get.call_count == 2
 
-    @patch('datetime.datetime', MagicMock(now=lambda tz: datetime.fromisoformat(MOCK_NOW.replace('Z', '+00:00')),
-                                          side_effect=lambda tz: datetime.fromisoformat(
-                                              MOCK_NOW.replace('Z', '+00:00'))))
-    def test_api_final_failure(self, mock_get, app_config):
-        """Test failure after exhausting all retries."""
-        client = TomorrowAPIClient(app_config['api'])
 
-        # Max retries is 3. Sequence: 500, 500, 500 (3 calls total)
+    def test_429_rate_limit_hard_failure(self, mock_get, app_config):
+        """429 errors must fail immediately (no retries)."""
+
+        mock_get.return_value = mock_get_request(429)
+
+        client = TomorrowAPIClient(app_config["api"])
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            client.fetch_weather_data(25.9, -97.4)
+
+        assert mock_get.call_count == 1
+
+
+    def test_retry_exhaustion_raises(self, mock_get, app_config):
+        """All retries exhausted → exception is raised."""
+
         mock_get.side_effect = [
             mock_get_request(500),
             mock_get_request(500),
             mock_get_request(500),
-            requests.exceptions.HTTPError("Mock Final Failure")  # The API client re-raises the final error
         ]
 
-        with pytest.raises(requests.exceptions.HTTPError):
-            with patch('time.sleep'):
-                client.fetch_weather_data(25.9, -97.4)
+        client = TomorrowAPIClient(app_config["api"])
 
-        # Should have called mock_get for history (3 times) before the exception is raised.
-        # Note: Depending on implementation flow, this count can vary slightly, but the exception is key.
+        with patch("time.sleep"), pytest.raises(requests.exceptions.HTTPError):
+            client.fetch_weather_data(25.9, -97.4)
+
+        assert mock_get.call_count == app_config["api"]["max_retries"]

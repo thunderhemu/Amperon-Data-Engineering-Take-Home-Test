@@ -1,32 +1,23 @@
 locations:
   - lat: 25.8600
     lon: -97.4200
-  # ... (include all 10 locations here)
-  - lat: 25.9000
-    lon: -97.5200
-  - lat: 25.9000
-    lon: -97.4800
-  - lat: 25.9000
-    lon: -97.4400
-  - lat: 25.9000
-    lon: -97.4000
-  - lat: 25.9200
-    lon: -97.3800
-  - lat: 25.9400
-    lon: -97.5400
-  - lat: 25.9400
-    lon: -97.5200
-  - lat: 25.9400
-    lon: -97.4800
-  - lat: 25.9400
-    lon: -97.4400
+
+rate_limit_sleep_seconds: 5
 
 api:
   base_url: "https://api.tomorrow.io"
- # TOMORROW_IO_API_KEY:  paste your key here and enable it
-  history_endpoint: "/weather/history/historical"
-  forecast_endpoint: "/weather/forecast"
-  timesteps: ["1h"]
+  forecast_endpoint: "/v4/weather/forecast"
+
+  fields:
+    - temperature
+    - windSpeed
+    - humidity
+    - precipitationType
+
+  timesteps:
+    - "1h"
+
   units: "imperial"
   timeout_seconds: 15
   max_retries: 3
+  retry_backoff_seconds: 2

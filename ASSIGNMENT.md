@@ -36,6 +36,7 @@ Design the system to answer the following questions using SQL:
 * When in doubt - document your uncertainty in the README, along with your choice, and move on.
 * We would rather see the best practices in software and data engineering than a complicated or even complete solution.
 
+
 ## Result
 
 * Submit a public GitHub repository with the working code.
