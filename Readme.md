@@ -31,6 +31,26 @@ Each service is defined and orchestrated using `docker-compose.yml`.
 
 ### Setup Instructions
 
+## Testing & Code Coverage
+
+This project includes unit tests for all core components:
+- API client (retry logic, rate-limit handling)
+- Configuration loading and validation
+- Database persistence and idempotent inserts
+- ETL orchestration logic
+
+Entry-point modules and long-running scheduler logic are intentionally excluded
+from unit tests, as they contain no business logic and are better validated via
+integration testing.
+
+### Run Unit Tests Locally
+
+From the project root, activate the virtual environment and run:
+
+```bash
+pytest -v
+
+
 1.  **Set API Key:** Create a file named `.env` in the root directory of this project and add your Tomorrow.io API key:
 
     ```

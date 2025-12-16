@@ -1,5 +1,6 @@
 pytest==8.1.1
 jupyter==1.0.0
+pytest-cov
 
 # API Client
 requests
